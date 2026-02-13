@@ -2191,3 +2191,84 @@ func TestEndpointSyncOnDisconnect(t *testing.T) {
 	require.Empty(t, manager.healthyDevices)
 	require.Empty(t, manager.unhealthyDevices)
 }
+
+// TestUpdateAllocatedDevicesRemovesCheckpointEntry verifies that when a pod is removed,
+// its checkpoint entry is also removed from the checkpoint file (issue #137010).
+func TestUpdateAllocatedDevicesRemovesCheckpointEntry(t *testing.T) {
+	logger, _ := ktesting.NewTestContext(t)
+	resourceName := "domain.com/resource"
+	pod1UID := "pod1-uid"
+	pod2UID := "pod2-uid"
+	containerName := "container"
+	deviceID := "dev1"
+
+	// Create temporary checkpoint directory
+	tmpDir, err := os.MkdirTemp("", "checkpoint")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	// Create checkpoint manager
+	ckm, err := checkpointmanager.NewCheckpointManager(tmpDir)
+	require.NoError(t, err)
+
+	// Create test manager
+	testManager := &ManagerImpl{
+		endpoints:         make(map[string]endpointInfo),
+		healthyDevices:    make(map[string]sets.Set[string]),
+		unhealthyDevices:  make(map[string]sets.Set[string]),
+		allocatedDevices:  make(map[string]sets.Set[string]),
+		podDevices:        newPodDevices(),
+		checkpointManager: ckm,
+		activePods: func() []*v1.Pod {
+			// Initially no pods, later will have only pod2
+			return nil
+		},
+		sourcesReady: &sourcesReadyStub{},
+	}
+
+	// Insert device allocation for two pods
+	devicesPerNUMA := checkpoint.NewDevicesPerNUMA()
+	devicesPerNUMA[0] = append(devicesPerNUMA[0], deviceID)
+
+	// Create allocation responses for the test pods
+	allocResp := newContainerAllocateResponse(
+		withDevices(map[string]string{"/dev/dev1": "/dev/dev1"}),
+		withMounts(map[string]string{"/home/lib1": "/usr/lib1"}),
+	)
+
+	testManager.podDevices.insert(pod1UID, containerName, resourceName, devicesPerNUMA, allocResp)
+	testManager.podDevices.insert(pod2UID, containerName, resourceName, devicesPerNUMA, allocResp)
+	testManager.allDevices = make(ResourceDeviceInstances)
+
+	// Write initial checkpoint with both pods
+	err = testManager.writeCheckpoint(logger)
+	require.NoError(t, err)
+
+	// Verify checkpoint contains both pods
+	cp := checkpoint.New(nil, nil)
+	err = ckm.GetCheckpoint(kubeletDeviceManagerCheckpoint, cp)
+	require.NoError(t, err)
+	podEntries, _ := cp.GetData()
+	require.Len(t, podEntries, 2)
+
+	// Simulate pod1 deletion by making activePods return only pod2
+	activePod2 := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			UID: types.UID(pod2UID),
+		},
+	}
+	testManager.activePods = func() []*v1.Pod {
+		return []*v1.Pod{activePod2}
+	}
+
+	// Call UpdateAllocatedDevices which should remove pod1 and update checkpoint
+	testManager.UpdateAllocatedDevices()
+
+	// Verify checkpoint now contains only pod2
+	cp2 := checkpoint.New(nil, nil)
+	err = ckm.GetCheckpoint(kubeletDeviceManagerCheckpoint, cp2)
+	require.NoError(t, err)
+	podEntries2, _ := cp2.GetData()
+	require.Len(t, podEntries2, 1)
+	require.Equal(t, pod2UID, podEntries2[0].PodUID)
+}

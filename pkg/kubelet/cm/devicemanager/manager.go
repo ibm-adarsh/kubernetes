@@ -505,6 +505,10 @@ func (m *ManagerImpl) writeCheckpoint(logger klog.Logger) error {
 	data := checkpoint.New(m.podDevices.toCheckpointData(logger),
 		registeredDevs)
 	m.mutex.Unlock()
+	if m.checkpointManager == nil {
+		logger.V(2).Info("Checkpoint manager is nil, skipping checkpoint write")
+		return nil
+	}
 	err := m.checkpointManager.CreateCheckpoint(kubeletDeviceManagerCheckpoint, data)
 	if err != nil {
 		err2 := fmt.Errorf("failed to write checkpoint file %q: %v", kubeletDeviceManagerCheckpoint, err)
@@ -563,18 +567,24 @@ func (m *ManagerImpl) UpdateAllocatedDevices() {
 		return
 	}
 	m.mutex.Lock()
-	defer m.mutex.Unlock()
 	podsToBeRemoved := m.podDevices.pods()
 	for _, pod := range activePods {
 		podsToBeRemoved.Delete(string(pod.UID))
 	}
 	if len(podsToBeRemoved) <= 0 {
+		m.mutex.Unlock()
 		return
 	}
 	logger.V(3).Info("Pods to be removed", "podUIDs", sets.List(podsToBeRemoved))
 	m.podDevices.delete(sets.List(podsToBeRemoved))
 	// Regenerated allocatedDevices after we update pod allocation information.
 	m.allocatedDevices = m.podDevices.devices()
+	m.mutex.Unlock()
+
+	// Update checkpoint file to persist the removal of pod device entries.
+	if err := m.writeCheckpoint(logger); err != nil {
+		logger.Error(err, "Failed to write checkpoint after removing pods")
+	}
 }
 
 // Returns list of device Ids we need to allocate with Allocate rpc call.
