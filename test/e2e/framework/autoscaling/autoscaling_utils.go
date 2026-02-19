@@ -1156,6 +1156,33 @@ func CreateExternalHorizontalPodAutoscaler(ctx context.Context, rc *ResourceCons
 	return CreateMultiMetricHorizontalPodAutoscaler(ctx, rc, metrics, minReplicas, maxReplicas)
 }
 
+// CreateMultiMetricHorizontalPodAutoscalerWithBehavior creates an HPA with multiple metrics and custom behavior
+func CreateMultiMetricHorizontalPodAutoscalerWithBehavior(ctx context.Context, rc *ResourceConsumer, metrics []autoscalingv2.MetricSpec, minReplicas, maxReplicas int32, behavior *autoscalingv2.HorizontalPodAutoscalerBehavior) *autoscalingv2.HorizontalPodAutoscaler {
+	targetRef := autoscalingv2.CrossVersionObjectReference{
+		APIVersion: rc.kind.GroupVersion().String(),
+		Kind:       rc.kind.Kind,
+		Name:       rc.name,
+	}
+
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      rc.name,
+			Namespace: rc.nsName,
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: targetRef,
+			MinReplicas:    &minReplicas,
+			MaxReplicas:    maxReplicas,
+			Metrics:        metrics,
+			Behavior:       behavior,
+		},
+	}
+
+	hpa, err := rc.clientSet.AutoscalingV2().HorizontalPodAutoscalers(rc.nsName).Create(ctx, hpa, metav1.CreateOptions{})
+	framework.ExpectNoError(err)
+	return hpa
+}
+
 // CreateExternalMetricSpec creates a MetricSpec for external metrics
 func CreateExternalMetricSpec(metricName string, metricSelector map[string]string, targetType autoscalingv2.MetricTargetType, targetValue int64) autoscalingv2.MetricSpec {
 	var selector *metav1.LabelSelector
